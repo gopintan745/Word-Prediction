@@ -15,11 +15,17 @@ Key design decisions:
   - Special tokens: <pad>=0, <unk>=1, <bos>=2, <eos>=3
 """
 
+import os
 import re
 import pickle
 from pathlib import Path
 from collections import Counter
 from typing import List, Tuple, Optional
+
+# Conda (MKL) and PyTorch both ship Intel OpenMP on Windows.
+# Without this, importing numpy/torch can abort with OMP Error #15.
+if os.name == "nt":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 import torch
