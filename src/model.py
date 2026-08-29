@@ -151,7 +151,7 @@ class WordLSTM(nn.Module):
 
         # ── Embedding layer ────────────────────────────────────────────
         # padding_idx=0 means token0 (<pad>) always has zero vector AND
-        # zero gradient. This prevents<pad> from contributing to loss        # when masked via ignore_index=0 in cross-entropy.
+        # zero gradient. This prevents<pad> from contributing to loss when masked via ignore_index=0 in cross-entropy.
         self.embedding = nn.Embedding(
             config.vocab_size,
             config.embedding_dim,
@@ -159,7 +159,7 @@ class WordLSTM(nn.Module):
         )
 
         # ── LSTM ───────────────────────────────────────────────────────
-        # batch_first=True: input shape is (batch, seq, feature), which        # is more intuitive than PyTorch's default (seq, batch, feature).
+        # batch_first=True: input shape is (batch, seq, feature), which is more intuitive than PyTorch's default (seq, batch, feature).
         #
         # dropout is applied to LSTM *inputs and outputs* between layers,
         # but NOT to recurrent transitions. This is the standard safe pattern.

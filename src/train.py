@@ -91,7 +91,7 @@ class TrainingConfig:
     keep_last_n_checkpoints: int = 3
 
     # Mixed precision
-    use_amp: bool = True
+    use_amp: bool = False
 
     # Reproducibility
     seed: int = 42
