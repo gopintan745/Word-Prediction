@@ -244,7 +244,7 @@ class WordLSTM(nn.Module):
         embedded = self.dropout_emb(embedded)
 
         # Step 3: Dropout on LSTM inputs (between embedding and LSTM)
-        embedded = self.dropout_in(embedded)
+        #embedded = self.dropout_in(embedded)
 
         # Step 4: Run the LSTM
         # output shape: (batch, seq_length, hidden_size)

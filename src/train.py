@@ -485,7 +485,8 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                     max_norm=config.grad_clip,
                 )
 
-                # Optimizer step                scaler.step(optimizer)
+                # Optimizer step                
+                scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
 
