@@ -488,7 +488,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 # Optimizer step                
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                #optimizer.zero_grad()
 
                 # Scheduler steps every optimizer step, not every batch
                 # (since grad accumulation means multiple batches per step)
