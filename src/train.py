@@ -455,6 +455,7 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         epoch_start = time.time()
 
         optimizer.zero_grad()
+        scheduler.step()
 
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
@@ -492,7 +493,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
 
                 # Scheduler steps every optimizer step, not every batch
                 # (since grad accumulation means multiple batches per step)
-                scheduler.step()
 
                 global_step += 1
 
