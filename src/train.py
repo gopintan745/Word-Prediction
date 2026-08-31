@@ -684,6 +684,7 @@ def parse_args() -> TrainingConfig:
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--no_amp', action='store_true')
     parser.add_argument('--patience', type=int, dest='early_stopping_patience')
+    parser.add_argument('--t_max', type=int, dest='scheduler_t_max')
 
     args = parser.parse_args()
     config = TrainingConfig()
