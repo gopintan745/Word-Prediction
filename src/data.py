@@ -172,36 +172,38 @@ class TextDataset:
     NumPy is more memory-efficient than Python lists for millions of integers,
     and PyTorch's DataLoader can yield NumPy arrays directly.
 
-    Splits are sequential (not random):
+    Two split strategies are supported:
+
+    1. "chunked" (default): Divides corpus into contiguous chunks, shuffles
+       chunk indices randomly, and assigns to train/val/test. Preserves local
+       text order within each chunk (good for LSTM context) while randomizing
+       which chunks appear in each split. Controlled by split_seed.
+
+    2. "sequential" (backward-compatible): Splits corpus sequentially:
         [0 ........ val_start ........ test_start ........ end]
                           │ │
  val set          test set
                           └──── train ───┘
-
-    Sequential splits preserve natural text order, which matters for language
-    modeling — random shuffling would leak future context into training.
+       Preserves global text order (may leak future context into training).
     """
 
     def __init__(
-        self,
-        texts: List[str],
-        vocab: Optional[Vocabulary] = None,
-        min_freq: int = 2,
-        max_vocab_size: Optional[int] = None,
-        val_ratio: float = 0.05,
-        test_ratio: float = 0.05,
-    ):
-        # Build vocab if not provided. This step is expensive, so for large
-        # corpora you might want to cache it.
+    self,
+    texts: List[str],
+    vocab: Optional[Vocabulary] = None,
+    min_freq: int = 2,
+    max_vocab_size: Optional[int] = None,
+    val_ratio: float = 0.05,
+    test_ratio: float = 0.05,
+    split_strategy: str = "chunked",   # "chunked" (default) or "sequential" (legacy)
+    chunk_size: int = 2000,            # tokens per chunk (for chunked strategy); should be >> seq_length
+    split_seed: int = 42,              # random seed for shuffling chunks (only used in chunked strategy)
+):
+            
         if vocab is None:
             vocab = Vocabulary(texts, min_freq=min_freq, max_size=max_vocab_size)
-
         self.vocab = vocab
 
-        # Tokenize once, encode to ints, store as NumPy array.
-        # Joining all texts with <eos> between them gives the model a clear
-        # boundary signal. Each document becomes a coherent sequence, then
-        # the <eos> breaks context between documents.
         token_streams = []
         for text in texts:
             ids = vocab.encode(text)
@@ -211,93 +213,77 @@ class TextDataset:
         all_ids = [tid for stream in token_streams for tid in stream]
         self.data = np.array(all_ids, dtype=np.int64)
 
-        # Sequential splits
         n = len(self.data)
-        test_start = int(n * (1 - test_ratio))
-        val_start = int(n * (1 - test_ratio - val_ratio))
 
-        self.train_data = self.data[:val_start]
-        self.val_data   = self.data[val_start:test_start]
-        self.test_data  = self.data[test_start:]
+        if split_strategy == "sequential":
+            # Legacy sequential split: divides corpus by ratios without shuffling.
+            # Preserves full text order but may leak future context into training.
+            # Kept for backward compatibility; "chunked" is preferred.
+            test_start = int(n * (1 - test_ratio))
+            val_start = int(n * (1 - test_ratio - val_ratio))
+            self.train_data = self.data[:val_start]
+            self.val_data   = self.data[val_start:test_start]
+            self.test_data  = self.data[test_start:]
 
-        # Diagnostics — useful for debugging the pipeline
-        print(f"[TextDataset] Vocab size: {len(vocab):,}")
-        print(f"[TextDataset] Total tokens: {n:,}")
-        print(f"[TextDataset] Train: {len(self.train_data):,}  "
-              f"Val: {len(self.val_data):,}  Test: {len(self.test_data):,}")
+        elif split_strategy == "chunked":
+            # Default chunked split: shuffles chunks then assigns to splits.
+            # Gives splits independent, overlapping samples while preserving
+            # local context within each chunk (good for LSTM).
+            n_chunks = n // chunk_size
+            chunk_ids = np.arange(n_chunks)
+            rng = np.random.RandomState(split_seed)
+            rng.shuffle(chunk_ids)
+
+            n_test = max(1, int(n_chunks * test_ratio))
+            n_val = max(1, int(n_chunks * val_ratio))
+            test_chunks = set(chunk_ids[:n_test])
+            val_chunks = set(chunk_ids[n_test:n_test + n_val])
+            train_chunks = set(chunk_ids[n_test + n_val:])
+
+            def _token_count(data) -> int:
+                return len(data) if isinstance(data, np.ndarray) else sum(len(c) for c in data)
+
+            def gather(chunk_set):
+                pieces = [
+                    self.data[i * chunk_size:(i + 1) * chunk_size]
+                    for i in sorted(chunk_set)  # keep local order within each piece
+                ]
+                return np.concatenate(pieces) if pieces else np.array([], dtype=np.int64)
+
+            self.train_data = gather(train_chunks)
+            self.val_data = gather(val_chunks)
+            self.test_data = gather(test_chunks)
+        else:
+            raise ValueError(f"Unknown split_strategy: {split_strategy}")
 
     def save_vocab(self, path: str):
+        """Save the vocabulary to disk. Convenience method that delegates to vocab.save()."""
         self.vocab.save(path)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Random Window Dataset
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RandomWindowDataset(Dataset):
-    """
-    Yields (input, target) pairs from a corpus using random offset sampling.
-
-    This is the standard approach for language model training because:
-      - Each batch sees different positions → better gradient signal
-      - No need to track epoch boundaries
-      - Natural data augmentation (many ways to slice the same corpus)
-
-    Important: the target is the input shifted right by one position. This is the "input/target shift trick" — one forward pass produces N predictions,
-    one for each position, all evaluated against the next-token target.
-
-    Input/Target shape: (batch_size, seq_length)
-        Example (seq_length=4):
-            input:  [10, 20, 30, 40]
-            target: [20, 30, 40, 50] ← shifted by 1
- """
-
-    def __init__(self, data: np.ndarray, seq_length: int, num_samples: int):
-        """
-        Args:
-            data:1-D NumPy array of token IDs.
-            seq_length:  Number of tokens per training example (chunk size for TBPTT).
-            num_samples: Number of (input, target) pairs to draw per "epoch".
-                         Set this large (e.g., len(data) // seq_length * 10)
-                         to give the model many chances to see each token.
-        """
-        # We need seq_length + 1 tokens per sample because we need both
-        # the input window AND the shifted target window.
-        if len(data) <= seq_length:
-            raise ValueError(
-                f"Data length ({len(data)}) must be > seq_length ({seq_length})"
-            )
-
-        self.data = data
+    def __init__(self, data, seq_length, num_samples):
+        # data: np.ndarray (old "sequential" splits) or List[np.ndarray] (chunked splits)
+        self.chunks = [data] if isinstance(data, np.ndarray) else [c for c in data if len(c) > seq_length + 1]
         self.seq_length = seq_length
         self.num_samples = num_samples
 
-    def __len__(self) -> int:
+        valid_starts = np.array([len(c) - seq_length - 1 for c in self.chunks], dtype=np.float64)
+        self.chunk_probs = valid_starts / valid_starts.sum()
+
+    def __len__(self):
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns one random (input, target) window.
-
-        The `idx` argument is unused because we sample randomly — PyTorch needs
-        __getitem__ to accept an index, but we ignore it. This is the
-        recommended pattern when each "sample" is itself a random slice.
-
-        We subtract (seq_length + 1) from the maximum offset so we never        sample past the end of the array.
-        """
-        max_offset = len(self.data) - self.seq_length - 1
+    def __getitem__(self, idx):
+        chunk = self.chunks[np.random.choice(len(self.chunks), p=self.chunk_probs)]
+        max_offset = len(chunk) - self.seq_length - 1
         start = np.random.randint(0, max_offset)
-
-        # Input window        
-        x = self.data[start : start + self.seq_length]
-        # Target window — shifted by 1 (the next-token target)
-        y = self.data[start + 1 : start + self.seq_length + 1]
-
-        return (
-            torch.from_numpy(x.copy()).long(),
-            torch.from_numpy(y.copy()).long(),
-        )
-
+        x = chunk[start : start + self.seq_length]
+        y = chunk[start + 1 : start + self.seq_length + 1]
+        return torch.from_numpy(x.copy()).long(), torch.from_numpy(y.copy()).long()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. DataLoader Factory
@@ -380,36 +366,27 @@ def create_dataloaders(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SequentialWindowDataset(Dataset):
-    """
-    Non-overlapping sequential windows for reproducible evaluation.
-
-    We split the held-out split into chunks of (seq_length + 1) tokens
-    (the +1 is for the target shift). Drop the last partial chunk if any.
-
-    This is different from training, where random offsets give the model
-    many overlapping views of the data. For evaluation, we want every
-    token to be evaluated exactly once → non-overlapping windows.
-    """
-
-    def __init__(self, data: np.ndarray, seq_length: int):
-        self.data = data
+    def __init__(self, data, seq_length):
+        chunks = [data] if isinstance(data, np.ndarray) else data
+        self.chunks = chunks
         self.seq_length = seq_length
-        # Number of full (seq_length + 1) windows we can extract
-        self.num_windows = (len(data) - 1) // seq_length
+        # Build a per-chunk index so windows never straddle a chunk boundary;
+        # each chunk independently drops its own remainder < seq_length tokens.
+        self.index = []
+        for ci, c in enumerate(chunks):
+            num_windows = (len(c) - 1) // seq_length
+            self.index.extend((ci, w * seq_length) for w in range(num_windows))
 
-    def __len__(self) -> int:
-        return self.num_windows
+    def __len__(self):
+        return len(self.index)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        start = idx * self.seq_length
+    def __getitem__(self, idx):
+        ci, start = self.index[idx]
+        chunk = self.chunks[ci]
         end = start + self.seq_length
-        x = self.data[start:end]
-        y = self.data[start + 1 : end + 1]
-        return (
-            torch.from_numpy(x.copy()).long(),
-            torch.from_numpy(y.copy()).long(),
-        )
-
+        x = chunk[start:end]
+        y = chunk[start + 1 : end + 1]
+        return torch.from_numpy(x.copy()).long(), torch.from_numpy(y.copy()).long()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Raw Text Loader (convenience)

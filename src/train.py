@@ -7,7 +7,8 @@ Features:
   - Mixed precision training (AMP) for speed + memory savings
   - Gradient accumulation for effective large batches
   - Gradient clipping (essential for RNN stability)
-  - Cosine annealing LR schedule with warm restarts
+  - Cosine annealing LR schedule (simple, predictable decay)
+  - Early stopping when validation loss plateaus (saves compute)
   - Validation every N steps with perplexity tracking
   - Checkpointing: best model + latest + periodic
   - Text generation samples at intervals
@@ -334,7 +335,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
       3. Model: build and move to device
       4. Optimizer + scheduler
       5. Resume (if requested)
-      6. Training loop: train step → eval → checkpoint → sample 7. Final test evaluation
+      6. Training loop: train step → eval → checkpoint → sample
+      7. Early stopping: stops training if validation loss plateaus
+      8. Final test evaluation
     """
 
     # ── Setup ───────────────────────────────────────────────────────────
@@ -575,7 +578,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         val_metrics = evaluate(model, val_loader, device)
         logger.log("val_end", epoch=epoch, **val_metrics)
 
-        # Early stopping logic
+        # Early stopping logic: monitor validation loss and stop training
+        # if no improvement is observed for `early_stopping_patience` epochs.
+        # This saves compute and prevents overfitting on validation plateau.
         if val_metrics['loss'] < best_val_loss - config.early_stopping_min_delta:
             best_val_loss = val_metrics['loss']
             patience_counter = 0
