@@ -94,7 +94,7 @@ class TrainingConfig:
     keep_last_n_checkpoints: int = 3
 
     # Mixed precision
-    use_amp: bool = False
+    use_amp: bool = True
 
     # Reproducibility
     seed: int = 42
@@ -683,6 +683,7 @@ def parse_args() -> TrainingConfig:
     parser.add_argument('--seq_length', type=int)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--no_amp', action='store_true')
+    parser.add_argument('--patience', type=int, dest='early_stopping_patience')
 
     args = parser.parse_args()
     config = TrainingConfig()
