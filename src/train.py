@@ -74,10 +74,13 @@ class TrainingConfig:
     grad_clip: float = 5.0
     accumulation_steps: int = 1  # >1 for gradient accumulation
 
-    # Scheduler (CosineAnnealingWarmRestarts)
-    scheduler_t0: int = 10
-    scheduler_t_mult: int = 2
+    # Scheduler (CosineAnnealingLR)
+    scheduler_t_max: int = epochs  # number of epochs for a full cosine cycle
     scheduler_eta_min: float = 1e-6
+
+    # Early stopping
+    early_stopping_patience: int = 5
+    early_stopping_min_delta: float = 1e-4
 
     # Evaluation
     eval_every_n_steps: int = 500
@@ -415,12 +418,11 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         weight_decay=config.weight_decay,
     )
 
-    # CosineAnnealingWarmRestarts: LR follows a cosine curve that
-    # restarts every T_0 epochs. With T_mult=1, each restart period    # has the same length. With T_mult=2, each is twice as long.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    # CosineAnnealingLR: LR follows a cosine curve for T_max epochs,
+    # annealing from initial_lr to eta_min. Clean and predictable.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_0=config.scheduler_t0,
-        T_mult=config.scheduler_t_mult,
+        T_max=config.scheduler_t_max,
         eta_min=config.scheduler_eta_min,
     )
 
@@ -431,8 +433,9 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
     # ── Resume ──────────────────────────────────────────────────────────
     start_epoch = 0
     global_step = 0
-    best_val_loss = float('inf')
-
+    best_val_loss = float('inf')    
+    patience_counter = 0
+    early_stopping_triggered = False
     if resume_from and Path(resume_from).exists():
         print(f"\nResuming from {resume_from}...")
         meta = load_checkpoint(resume_from, model, optimizer, scheduler, device)
@@ -455,7 +458,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
         epoch_start = time.time()
 
         optimizer.zero_grad()
-        scheduler.step()
 
         for batch_idx, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
@@ -489,10 +491,6 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 # Optimizer step                
                 scaler.step(optimizer)
                 scaler.update()
-                #optimizer.zero_grad()
-
-                # Scheduler steps every optimizer step, not every batch
-                # (since grad accumulation means multiple batches per step)
 
                 global_step += 1
 
@@ -570,12 +568,17 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
             time_s=epoch_time,
  )
 
+        # Step scheduler at end of epoch
+        scheduler.step()
+
         # Validation at end of epoch
         val_metrics = evaluate(model, val_loader, device)
         logger.log("val_end", epoch=epoch, **val_metrics)
 
-        if val_metrics['loss'] < best_val_loss:
+        # Early stopping logic
+        if val_metrics['loss'] < best_val_loss - config.early_stopping_min_delta:
             best_val_loss = val_metrics['loss']
+            patience_counter = 0
             save_checkpoint(
                 ckpt_dir / "best.pt",
                 model, optimizer, scheduler,
@@ -583,6 +586,21 @@ def train(config: TrainingConfig, resume_from: Optional[str] = None):
                 epoch, global_step, best_val_loss,
                 val_metrics['loss'],
             )
+            logger.log("best_checkpoint", epoch=epoch, val_loss=best_val_loss)
+        else:
+            patience_counter += 1
+            logger.log("patience", epoch=epoch, patience=patience_counter, best_loss=best_val_loss)
+            if patience_counter >= config.early_stopping_patience:
+                logger.log(
+                    "early_stopping",
+                    epoch=epoch,
+                    reason=f"no improvement for {config.early_stopping_patience} epochs",
+                    best_val_loss=best_val_loss,
+                )
+                early_stopping_triggered = True
+                print(f"\nEarly stopping triggered at epoch {epoch}")
+                print(f"Best validation loss: {best_val_loss:.4f}")
+                break
 
         # Always save latest
         save_checkpoint(
