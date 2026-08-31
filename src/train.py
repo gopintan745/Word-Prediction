@@ -76,7 +76,7 @@ class TrainingConfig:
 
     # Scheduler (CosineAnnealingWarmRestarts)
     scheduler_t0: int = 10
-    scheduler_t_mult: int = 1
+    scheduler_t_mult: int = 2
     scheduler_eta_min: float = 1e-6
 
     # Evaluation
